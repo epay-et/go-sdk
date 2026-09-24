@@ -53,13 +53,23 @@ jobs:
           fi
 
       # go.mod has no requires, so tidy must leave it untouched.
+      #
+      # Checked with `git status` rather than `git diff`: this module has no
+      # dependencies and therefore no go.sum, and `git diff -- go.sum` fails
+      # with "no such path" on a file that does not exist. Using status also
+      # catches a go.sum that tidy newly creates, which a diff of tracked paths
+      # would miss entirely.
       - name: go mod tidy is a no-op
         run: |
           go mod tidy
-          git diff --exit-code go.mod go.sum 2>/dev/null || {
+          CHANGED=$(git status --porcelain -- go.mod go.sum)
+          if [ -n "$CHANGED" ]; then
             echo "::error::go mod tidy changed the module files; commit the result"
+            echo "$CHANGED"
+            git diff -- go.mod
             exit 1
-          }
+          fi
+          echo "go.mod is tidy, and no go.sum is needed"
 
   coverage:
     name: Coverage
