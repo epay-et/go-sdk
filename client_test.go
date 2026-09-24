@@ -95,7 +95,7 @@ func newTestClient(t *testing.T, server *httptest.Server, opts ...Option) *Clien
 }
 
 const sessionJSON = `{"reference":"PAB12CD3420260813",` +
-	`"checkoutUrl":"https://checkout.e-pay.et/pay/PAB12CD3420260813",` +
+	`"checkoutUrl":"https://checkout.epayethiopia.com/pay/PAB12CD3420260813",` +
 	`"status":"success","expiresAt":"2026-08-13T12:30:00.000Z"}`
 
 // --- construction -----------------------------------------------------------

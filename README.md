@@ -1,8 +1,10 @@
 # go-sdk
 
-Official [ePay Business API](https://api.e-pay.et) client for Go.
+Official ePay Business API client for Go.
 
 Accept payments from every major Ethiopian mobile wallet and bank with one integration.
+
+Full API documentation: <https://docs.epayethiopia.com/>
 
 - **Zero dependencies** — standard library only
 - **Context-aware** on every call, with per-attempt timeouts
@@ -70,7 +72,7 @@ Options fall back to environment variables, so `epay.NewClient()` is often enoug
 | --- | --- | --- |
 | `WithAPIKey` | `EPAY_SECRET_KEY` | *required* |
 | `WithWebhookSecret` | `EPAY_WEBHOOK_SECRET` | — |
-| `WithBaseURL` | `EPAY_BASE_URL` | `https://api.e-pay.et/v1` |
+| `WithBaseURL` | `EPAY_BASE_URL` | `https://api.epayethiopia.com/v1` |
 | `WithTimeout` | — | `30s` per attempt |
 | `WithMaxRetries` | — | `2` |
 | `WithHTTPClient` | — | `&http.Client{}` |

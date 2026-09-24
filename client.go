@@ -48,10 +48,10 @@ import (
 )
 
 // Version is the SDK version, reported in the User-Agent.
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 // DefaultBaseURL is the production API root.
-const DefaultBaseURL = "https://api.e-pay.et/v1"
+const DefaultBaseURL = "https://api.epayethiopia.com/v1"
 
 // DefaultTimeout is the default per-attempt timeout.
 const DefaultTimeout = 30 * time.Second
