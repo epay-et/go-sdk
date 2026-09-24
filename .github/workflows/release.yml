@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      # A Go module version is the git tag. There is no registry upload and no
+      # way to unpublish, so everything is verified before the proxy caches it.
+      - name: Full check
+        run: |
+          go vet ./...
+          go test -race ./...
+          test -z "$(gofmt -l .)" || { echo "::error::run gofmt"; exit 1; }
+
+      - name: Verify the module path matches this repository
+        run: |
+          MODULE=$(go list -m)
+          EXPECTED="github.com/${GITHUB_REPOSITORY}"
+          if [ "$MODULE" != "$EXPECTED" ]; then
+            echo "::error::go.mod declares $MODULE but this repo is $EXPECTED"
+            exit 1
+          fi
+          echo "Module path is $MODULE"
+
+      # go.mod carries no version, so the tag is the only declaration of it.
+      # Version rides in the User-Agent and must agree.
+      - name: Verify the tag matches the Version constant
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CONSTANT=$(grep -oE 'Version = "[^"]+"' client.go | head -1 | cut -d'"' -f2)
+          echo "tag=$TAG constant=$CONSTANT"
+          [ "$TAG" = "$CONSTANT" ] || {
+            echo "::error::client.go Version is $CONSTANT but the tag is $TAG"
+            exit 1
+          }
+
+      # Publishing is just the tag. This asks the module proxy to fetch it now,
+      # so the first `go get` is warm and pkg.go.dev indexes it promptly.
+      - name: Warm the module proxy
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          MODULE=$(go list -m)
+          cd "$(mktemp -d)"
+          go mod init warm > /dev/null
+          GOPROXY=https://proxy.golang.org go get "${MODULE}@${GITHUB_REF_NAME}"
+          echo "Proxy now serves ${MODULE}@${GITHUB_REF_NAME}"
+
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

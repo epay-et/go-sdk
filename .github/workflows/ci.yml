@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.22 is the declared floor in go.mod.
+        go: ["1.22", "1.23", "stable"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Test
+        run: go test -race ./...
+
+  quality:
+    name: Vet and format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # go.mod has no requires, so tidy must leave it untouched.
+      - name: go mod tidy is a no-op
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum 2>/dev/null || {
+            echo "::error::go mod tidy changed the module files; commit the result"
+            exit 1
+          }
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go test -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out | tail -1
