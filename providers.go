@@ -29,11 +29,8 @@ func (s *ProvidersService) List(ctx context.Context) ([]ProviderItem, error) {
 	return envelope.Data, nil
 }
 
-// GetAll returns every provider on the account with its category and enabled
-// state.
-//
-// Disabled providers are included so your UI can show them as unavailable
-// rather than having them silently disappear.
+// GetAll returns every provider available to the account, each with the
+// payment flows it supports.
 //
 // It requires the get_platform_payment_provider permission, and otherwise
 // returns an error wrapping [ErrPermissionDenied].
@@ -49,20 +46,40 @@ func (s *ProvidersService) GetAll(ctx context.Context) ([]Provider, error) {
 	return envelope.Data, nil
 }
 
-// ListEnabled returns only the providers the account can currently route
-// payments through.
-func (s *ProvidersService) ListEnabled(ctx context.Context) ([]Provider, error) {
+// ListForDirectPayment returns the providers that can take a direct payment,
+// keeping only their direct-payment flows. Providers with no such flow are left
+// out.
+//
+// Pass a provider's ProviderCode as [DirectPaymentParams.PSPCode], and
+// pre-select the flow from [Provider.DefaultFlow].
+func (s *ProvidersService) ListForDirectPayment(ctx context.Context) ([]Provider, error) {
 	providers, err := s.GetAll(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	enabled := make([]Provider, 0, len(providers))
+	result := make([]Provider, 0, len(providers))
 	for _, provider := range providers {
-		if provider.IsEnabled {
-			enabled = append(enabled, provider)
+		var flows []ProviderFlow
+		for _, flow := range provider.Flows {
+			if flow.SupportsDirectPayment {
+				flows = append(flows, flow)
+			}
+		}
+		if len(flows) > 0 {
+			provider.Flows = flows
+			result = append(result, provider)
 		}
 	}
 
-	return enabled, nil
+	return result, nil
+}
+
+// ListEnabled returns the same list as [ProvidersService.GetAll].
+//
+// Deprecated: The API no longer reports a per-provider enabled state; every
+// provider it returns is available to the account. Use
+// [ProvidersService.GetAll] or [ProvidersService.ListForDirectPayment].
+func (s *ProvidersService) ListEnabled(ctx context.Context) ([]Provider, error) {
+	return s.GetAll(ctx)
 }

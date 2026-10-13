@@ -118,7 +118,7 @@ type InitializeParams struct {
 
 // InitializedPayment is the response of POST /v1/transactions/initialize.
 type InitializedPayment struct {
-	// Reference is the ePay reference, formatted P{8-hex}{yyyymmdd}.
+	// Reference is the ePay reference, an 8-character code such as A3BX72KP.
 	Reference string `json:"reference"`
 	// CheckoutURL is where to redirect the customer to pay.
 	CheckoutURL string `json:"checkoutUrl"`
@@ -126,6 +126,76 @@ type InitializedPayment struct {
 	Status string `json:"status"`
 	// ExpiresAt is when the checkout session expires, ISO 8601.
 	ExpiresAt string `json:"expiresAt"`
+}
+
+// DirectPaymentParams is the body of POST /v1/transactions/direct.
+//
+// Amount, CurrencyCode, and CustomerPhone follow the same rules as
+// [InitializeParams].
+type DirectPaymentParams struct {
+	// Amount as a numeric string, for example "250.00". Required.
+	Amount string
+	// CurrencyCode is an ISO 4217 code such as "ETB". Required.
+	CurrencyCode string
+	// CustomerPhone is the Ethiopian mobile number registered with the
+	// provider. Required.
+	CustomerPhone string
+	// PSPCode is the provider to charge through, such as "TELEBIRR" or "AWASH".
+	// Required. See [ProvidersService.ListForDirectPayment].
+	PSPCode string
+	// FlowCode overrides the provider's default flow, such as "USSD" or
+	// "SMS_OTP".
+	FlowCode string
+	// MerchantReference is your own unique reference, such as an order id.
+	MerchantReference string
+	// CallbackURL is a per-transaction webhook URL, overriding the dashboard one.
+	CallbackURL string
+	// IdempotencyKey, up to 255 characters. When empty the client generates a
+	// fresh key per call, which makes its internal retries safe but does not
+	// deduplicate across separate calls. Set your order id so a double-submitted
+	// form cannot charge twice.
+	IdempotencyKey string
+}
+
+// DirectPayment is the response of POST /v1/transactions/direct.
+type DirectPayment struct {
+	// Reference is the ePay reference, an 8-character code such as A3BX72KP.
+	Reference string `json:"reference"`
+	// Status is always pending: the outcome arrives by webhook once the
+	// customer authorizes on their phone.
+	Status TransactionStatus `json:"status"`
+	// ChargeAmount is the total charged to the customer, fees included.
+	ChargeAmount string `json:"chargeAmount"`
+	// FeeAmount is the fee deducted from the transaction.
+	FeeAmount string `json:"feeAmount"`
+	// Attempt is provider-specific session data whose shape varies by
+	// provider. Inspect it only when building a custom authorization UI.
+	Attempt map[string]any `json:"attempt"`
+}
+
+// SMSLinkParams is the body of POST /v1/transactions/sms-link.
+type SMSLinkParams struct {
+	// CustomerPhone is the Ethiopian mobile number to text the link to.
+	// Required.
+	CustomerPhone string
+	// CurrencyCode is an ISO 4217 code such as "ETB". Required.
+	CurrencyCode string
+	// Amount is a fixed amount to pre-fill and sign into the link. Leave it
+	// empty to let the customer enter the amount.
+	Amount string
+}
+
+// SMSLink is the response of POST /v1/transactions/sms-link.
+type SMSLink struct {
+	// Message confirms the SMS was dispatched.
+	Message string `json:"message"`
+	// CheckoutURL is the signed link sent to the customer, valid for 1 hour.
+	CheckoutURL string `json:"checkoutUrl"`
+	// CustomerPhone is the number the SMS was sent to.
+	CustomerPhone string `json:"customerPhone"`
+	// Amount is the pre-filled amount, or nil when the customer chooses it.
+	Amount       *string `json:"amount"`
+	CurrencyCode string  `json:"currencyCode"`
 }
 
 // Transaction is a transaction as returned by retrieve and list.
@@ -158,6 +228,24 @@ type VerifiedPayment struct {
 	Customer          Customer          `json:"customer"`
 	PaidAt            string            `json:"paidAt"`
 	CreatedAt         string            `json:"createdAt"`
+}
+
+// Receipt is the response of GET /v1/transactions/:reference/receipt.
+type Receipt struct {
+	Reference         string  `json:"reference"`
+	MerchantReference *string `json:"merchantReference"`
+	// Status is terminal: completed, failed, or cancelled.
+	Status TransactionStatus `json:"status"`
+	Amount string            `json:"amount"`
+	// ChargeAmount is the total charged to the customer, fees included.
+	ChargeAmount  string   `json:"chargeAmount"`
+	FeeAmount     *string  `json:"feeAmount"`
+	CurrencyCode  *string  `json:"currencyCode"`
+	PaymentMethod *string  `json:"paymentMethod"`
+	Customer      Customer `json:"customer"`
+	// PaidAt is nil for failed and cancelled transactions.
+	PaidAt    *string `json:"paidAt"`
+	CreatedAt string  `json:"createdAt"`
 }
 
 // ListParams are the query filters for GET /v1/transactions.
@@ -213,17 +301,37 @@ type ProviderItem struct {
 	FlowCode string `json:"flowCode"`
 }
 
-// Provider is a full entry from GET /v1/payment-providers.
+// ProviderFlow is a payment flow a provider supports.
+type ProviderFlow struct {
+	// FlowCode identifies the flow, such as "USSD", "SMS_OTP", or "IN_APP".
+	// Pass it as [DirectPaymentParams.FlowCode].
+	FlowCode string `json:"flowCode"`
+	// IsDefault marks the provider's recommended flow.
+	IsDefault bool `json:"isDefault"`
+	// SupportsDirectPayment reports whether [PaymentsService.DirectPayment]
+	// accepts this flow.
+	SupportsDirectPayment bool `json:"supportsDirectPayment"`
+}
+
+// Provider is an entry from GET /v1/payment-providers, with its flows grouped.
 type Provider struct {
+	// ProviderCode identifies the provider, such as "TELEBIRR". Pass it as
+	// [DirectPaymentParams.PSPCode].
 	ProviderCode string  `json:"providerCode"`
 	ProviderName *string `json:"providerName"`
-	// ProviderCategory is commonly "bank" or "mobile_money".
-	ProviderCategory *string `json:"providerCategory"`
-	FlowCode         string  `json:"flowCode"`
-	// IsEnabled reports whether your account has this provider enabled.
-	// Disabled providers are still returned so your UI can show them as
-	// unavailable rather than having them silently disappear.
-	IsEnabled bool `json:"isEnabled"`
+	// ProviderCategory is commonly "wallet" or "bank".
+	ProviderCategory *string        `json:"providerCategory"`
+	Flows            []ProviderFlow `json:"flows"`
+}
+
+// DefaultFlow returns the provider's recommended flow, if it marks one.
+func (p Provider) DefaultFlow() (ProviderFlow, bool) {
+	for _, flow := range p.Flows {
+		if flow.IsDefault {
+			return flow, true
+		}
+	}
+	return ProviderFlow{}, false
 }
 
 // providerEnvelope is the {"data": [...]} wrapper both provider endpoints use.
@@ -249,4 +357,12 @@ type WebhookEvent struct {
 	// PaidAt is nil for every non-success event.
 	PaidAt    *string `json:"paidAt"`
 	CreatedAt string  `json:"createdAt"`
+	// CustomerPhone is set on direct payment events.
+	CustomerPhone *string `json:"customerPhone"`
+	// PSPCode is the provider charged, set on direct payment events.
+	PSPCode *string `json:"pspCode"`
+	// OccurredAt is when the event occurred, ISO 8601.
+	OccurredAt *string `json:"occurredAt"`
+	// Reason explains a payment.failed event.
+	Reason *string `json:"reason"`
 }

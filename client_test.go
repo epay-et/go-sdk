@@ -470,20 +470,189 @@ func TestProvidersAreUnwrappedFromTheEnvelope(t *testing.T) {
 	}
 }
 
-func TestListEnabledFiltersDisabledProviders(t *testing.T) {
-	server, _ := newTestServer(t, reply{
-		status: 200,
-		body: `{"data":[{"providerCode":"cbe_birr","flowCode":"mobile_banking","isEnabled":true},` +
-			`{"providerCode":"awash_bank","flowCode":"mobile_banking","isEnabled":false}]}`,
-	})
+const providersBody = `{"data":[` +
+	`{"providerCode":"TELEBIRR","providerName":"TeleBirr","providerCategory":"wallet","flows":[` +
+	`{"flowCode":"USSD","isDefault":true,"supportsDirectPayment":true},` +
+	`{"flowCode":"SMS_OTP","isDefault":false,"supportsDirectPayment":false}]},` +
+	`{"providerCode":"CBE","providerName":"CBE","providerCategory":"bank","flows":[` +
+	`{"flowCode":"QR","isDefault":true,"supportsDirectPayment":false}]}]}`
+
+func TestGetAllDecodesGroupedFlows(t *testing.T) {
+	server, calls := newTestServer(t, reply{status: 200, body: providersBody})
 	client := newTestClient(t, server)
 
-	enabled, err := client.Providers.ListEnabled(context.Background())
+	providers, err := client.Providers.GetAll(context.Background())
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if (*calls)[0].Path != "/payment-providers" {
+		t.Errorf("path = %q", (*calls)[0].Path)
+	}
+	if len(providers) != 2 || len(providers[0].Flows) != 2 {
+		t.Fatalf("decoded %+v", providers)
+	}
+	flow, ok := providers[0].DefaultFlow()
+	if !ok || flow.FlowCode != "USSD" {
+		t.Errorf("DefaultFlow = %+v, %v", flow, ok)
+	}
+}
+
+func TestListForDirectPaymentKeepsOnlyDirectFlows(t *testing.T) {
+	server, _ := newTestServer(t, reply{status: 200, body: providersBody})
+	client := newTestClient(t, server)
+
+	providers, err := client.Providers.ListForDirectPayment(context.Background())
+	if err != nil {
+		t.Fatalf("ListForDirectPayment: %v", err)
+	}
+	if len(providers) != 1 || providers[0].ProviderCode != "TELEBIRR" ||
+		len(providers[0].Flows) != 1 || providers[0].Flows[0].FlowCode != "USSD" {
+		t.Errorf("providers = %+v", providers)
+	}
+}
+
+func TestDeprecatedListEnabledReturnsEveryProvider(t *testing.T) {
+	server, _ := newTestServer(t, reply{status: 200, body: providersBody})
+	client := newTestClient(t, server)
+
+	//nolint:staticcheck // exercising the deprecated method on purpose
+	providers, err := client.Providers.ListEnabled(context.Background())
 	if err != nil {
 		t.Fatalf("ListEnabled: %v", err)
 	}
-	if len(enabled) != 1 || enabled[0].ProviderCode != "cbe_birr" {
-		t.Errorf("enabled = %v", enabled)
+	if len(providers) != 2 {
+		t.Errorf("providers = %+v", providers)
+	}
+}
+
+// --- direct payment, SMS link, receipt ---------------------------------------
+
+const directBody = `{"reference":"A3BX72KP","status":"pending","chargeAmount":"250.00","feeAmount":"5.00","attempt":{}}`
+
+func TestDirectPaymentSendsANormalizedBody(t *testing.T) {
+	server, calls := newTestServer(t, reply{status: 200, body: directBody})
+	client := newTestClient(t, server)
+
+	charge, err := client.Payments.DirectPayment(context.Background(), DirectPaymentParams{
+		Amount:            "250",
+		CurrencyCode:      "etb",
+		CustomerPhone:     "0911 234 567",
+		PSPCode:           " TELEBIRR ",
+		FlowCode:          "USSD",
+		MerchantReference: "order_456",
+		IdempotencyKey:    "order_456",
+	})
+	if err != nil {
+		t.Fatalf("DirectPayment: %v", err)
+	}
+	if charge.Reference != "A3BX72KP" || charge.Status != StatusPending || charge.FeeAmount != "5.00" {
+		t.Errorf("decoded %+v", charge)
+	}
+
+	call := (*calls)[0]
+	if call.Method != http.MethodPost || call.Path != "/transactions/direct" {
+		t.Errorf("request = %s %s", call.Method, call.Path)
+	}
+	if got := call.Header.Get("x-idempotency-key"); got != "order_456" {
+		t.Errorf("idempotency key = %q", got)
+	}
+	want := `{"amount":"250.00","currencyCode":"ETB","customerPhone":"+251911234567",` +
+		`"pspCode":"TELEBIRR","flowCode":"USSD","merchantReference":"order_456"}`
+	if string(call.Body) != want {
+		t.Errorf("body = %s\nwant  %s", call.Body, want)
+	}
+}
+
+func TestDirectPaymentOmitsUnsetFieldsAndRetriesWithOneKey(t *testing.T) {
+	server, calls := newTestServer(t,
+		reply{status: 503, body: `{}`},
+		reply{status: 200, body: directBody},
+	)
+	client := newTestClient(t, server, WithMaxRetries(1))
+
+	_, err := client.Payments.DirectPayment(context.Background(), DirectPaymentParams{
+		Amount: "10", CurrencyCode: "ETB", CustomerPhone: "0911234567", PSPCode: "AWASH",
+	})
+	if err != nil {
+		t.Fatalf("DirectPayment: %v", err)
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("calls = %d", len(*calls))
+	}
+	first, second := (*calls)[0].Header.Get("x-idempotency-key"), (*calls)[1].Header.Get("x-idempotency-key")
+	if first == "" || first != second {
+		t.Errorf("keys = %q, %q", first, second)
+	}
+	if strings.Contains(string((*calls)[0].Body), "flowCode") {
+		t.Errorf("unset FlowCode was sent: %s", (*calls)[0].Body)
+	}
+}
+
+func TestDirectPaymentRequiresAProvider(t *testing.T) {
+	client, err := NewClient(WithAPIKey(testAPIKey), WithBaseURL("http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Payments.DirectPayment(context.Background(), DirectPaymentParams{
+		Amount: "10", CurrencyCode: "ETB", CustomerPhone: "0911234567", PSPCode: "   ",
+	})
+	if !errors.Is(err, ErrValidation) || !strings.Contains(err.Error(), "PSPCode") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestSendSMSLinkIsNormalizedAndNeverRetried(t *testing.T) {
+	linkBody := `{"message":"Checkout link sent via SMS","checkoutUrl":"https://x","customerPhone":"+251911234567",` +
+		`"amount":"500.00","currencyCode":"ETB"}`
+	server, calls := newTestServer(t, reply{status: 200, body: linkBody}, reply{status: 503, body: `{}`})
+	client := newTestClient(t, server, WithMaxRetries(2))
+
+	link, err := client.Payments.SendSMSLink(context.Background(), SMSLinkParams{
+		CustomerPhone: "0911234567", CurrencyCode: "etb", Amount: "500",
+	})
+	if err != nil {
+		t.Fatalf("SendSMSLink: %v", err)
+	}
+	if link.Amount == nil || *link.Amount != "500.00" {
+		t.Errorf("decoded %+v", link)
+	}
+	want := `{"customerPhone":"+251911234567","currencyCode":"ETB","amount":"500.00"}`
+	if (*calls)[0].Path != "/transactions/sms-link" || string((*calls)[0].Body) != want {
+		t.Errorf("request = %s %s", (*calls)[0].Path, (*calls)[0].Body)
+	}
+
+	_, err = client.Payments.SendSMSLink(context.Background(), SMSLinkParams{
+		CustomerPhone: "0911234567", CurrencyCode: "ETB",
+	})
+	if !errors.Is(err, ErrServer) {
+		t.Fatalf("expected ErrServer, got %v", err)
+	}
+	if len(*calls) != 2 {
+		t.Errorf("SMS link was retried: %d calls", len(*calls))
+	}
+	if strings.Contains(string((*calls)[1].Body), "amount") {
+		t.Errorf("empty Amount was sent: %s", (*calls)[1].Body)
+	}
+}
+
+func TestReceiptDecodesAnyTerminalStatus(t *testing.T) {
+	server, calls := newTestServer(t, reply{
+		status: 200,
+		body: `{"reference":"A3BX72KP","status":"failed","amount":"250.00","chargeAmount":"250.00",` +
+			`"feeAmount":null,"customer":{"phone":"+251911234567"},"paidAt":null,"createdAt":"2026-10-12T09:10:00.000Z"}`,
+	})
+	client := newTestClient(t, server)
+
+	receipt, err := client.Payments.Receipt(context.Background(), "A3BX72KP")
+	if err != nil {
+		t.Fatalf("Receipt: %v", err)
+	}
+	if (*calls)[0].Path != "/transactions/A3BX72KP/receipt" {
+		t.Errorf("path = %q", (*calls)[0].Path)
+	}
+	if receipt.Status != StatusFailed || receipt.PaidAt != nil || receipt.FeeAmount != nil {
+		t.Errorf("decoded %+v", receipt)
 	}
 }
 
@@ -775,5 +944,22 @@ func TestWebhookHandlerRejectsBadSignaturesWith401(t *testing.T) {
 	}
 	if received != nil {
 		t.Error("the handler ran despite an invalid signature")
+	}
+}
+
+func TestDirectPaymentEventFields(t *testing.T) {
+	verifier := NewWebhookVerifier(webhookSecret)
+	payload := `{"event":"payment.failed","reference":"A3BX72KP","pspCode":"TELEBIRR",` +
+		`"reason":"Customer cancelled","occurredAt":"2026-10-12T09:16:30.000Z"}`
+
+	event, err := verifier.ConstructEvent([]byte(payload), webhookSignature(payload, webhookSecret))
+	if err != nil {
+		t.Fatalf("ConstructEvent: %v", err)
+	}
+	if event.PSPCode == nil || *event.PSPCode != "TELEBIRR" || event.Reason == nil || event.OccurredAt == nil {
+		t.Errorf("direct payment fields were not decoded: %+v", event)
+	}
+	if !event.Event.IsKnown() {
+		t.Error("payment.failed should be a known event")
 	}
 }

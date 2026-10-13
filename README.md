@@ -140,6 +140,71 @@ Only `pending` and `processing` transactions can be cancelled, and cancellation
 is irreversible. This call is never retried automatically, because the endpoint
 takes no idempotency key.
 
+### Receipt for any outcome
+
+```go
+receipt, err := client.Payments.Receipt(ctx, reference)
+// receipt.Status is StatusCompleted, StatusFailed, or StatusCancelled
+```
+
+Unlike `Verify`, `Receipt` accepts failed and cancelled transactions too, which
+suits records, audits, and customer-facing receipts. It still returns an error
+wrapping `epay.ErrBadRequest` for a transaction that is `pending` or
+`processing`.
+
+## Direct payment
+
+Charge a customer's wallet or bank account without redirecting them anywhere.
+ePay pushes an authorization prompt (USSD menu, SMS OTP, or in-app notification)
+to their phone:
+
+```go
+charge, err := client.Payments.DirectPayment(ctx, epay.DirectPaymentParams{
+	Amount:            "250.00",
+	CurrencyCode:      "ETB",
+	CustomerPhone:     "0911234567",
+	PSPCode:           "TELEBIRR",
+	MerchantReference: "order_456",
+	IdempotencyKey:    "order_456",
+})
+// charge.Status == epay.StatusPending; store charge.Reference
+```
+
+The call returns as soon as the prompt is sent. The outcome arrives as a
+`payment.success` or `payment.failed` webhook once the customer approves or
+declines, so fulfil the order from your webhook handler, not from this response.
+
+Choose `PSPCode`, and optionally `FlowCode`, from the providers that support it:
+
+```go
+providers, err := client.Providers.ListForDirectPayment(ctx)
+for _, provider := range providers {
+	flow, _ := provider.DefaultFlow()
+	fmt.Println(provider.ProviderCode, flow.FlowCode)
+}
+```
+
+Like `Initialize`, a direct payment is retried safely with one idempotency key.
+Set your order id so a double-submitted form cannot charge twice. Direct payments
+must be enabled for your account; contact ePay support.
+
+## SMS payment link
+
+Text the customer a link to the hosted checkout page, for invoices, bills, and
+customers who are not present:
+
+```go
+link, err := client.Payments.SendSMSLink(ctx, epay.SMSLinkParams{
+	CustomerPhone: "0911234567",
+	CurrencyCode:  "ETB",
+	Amount:        "500.00", // leave empty to let the customer enter the amount
+})
+```
+
+An amount is signed into the link, so it cannot be tampered with. The link
+expires after 1 hour. This call is never retried automatically, so a customer is
+never texted twice.
+
 ## Transactions
 
 ```go
@@ -197,13 +262,21 @@ next, err := page.Next(ctx) // nil when this was the last page
 ## Payment providers
 
 ```go
-items, err := client.Providers.List(ctx)        // compact, for dropdowns
-all, err := client.Providers.GetAll(ctx)        // with category and IsEnabled
-enabled, err := client.Providers.ListEnabled(ctx) // only what you can route to
+all, err := client.Providers.GetAll(ctx)                 // every provider, with its Flows
+direct, err := client.Providers.ListForDirectPayment(ctx) // only what DirectPayment accepts
+items, err := client.Providers.List(ctx)                 // compact, for dropdowns
 ```
 
-Both endpoints are mode-aware and permission-gated: `List` needs
-`list_platform_payment_provider`, `GetAll` needs `get_platform_payment_provider`.
+Each provider lists its `Flows`. A flow's `IsDefault` marks the one to
+pre-select (`provider.DefaultFlow()` finds it), and `SupportsDirectPayment` marks
+the ones `DirectPayment` accepts.
+
+The endpoints are mode-aware and permission-gated: `GetAll` needs
+`get_platform_payment_provider`, and `List` needs `list_platform_payment_provider`.
+
+`ListEnabled` is deprecated. The API no longer reports a per-provider enabled
+state, so it now returns the same list as `GetAll`, and `Provider.IsEnabled` and
+`Provider.FlowCode` are gone in favour of `Provider.Flows`.
 
 ## Webhooks
 
@@ -255,6 +328,9 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 `ConstructEvent` and `ConstructEventFromRequest` fail closed: any event they
 return had a valid signature.
+
+Direct payment events also carry `PSPCode`, `CustomerPhone`, and `OccurredAt`, and
+`payment.failed` carries a `Reason`.
 
 ePay retries anything that is not a `2xx` within 10 seconds, up to 5 attempts,
 so keep the handler fast and make it idempotent — deduplicate on
